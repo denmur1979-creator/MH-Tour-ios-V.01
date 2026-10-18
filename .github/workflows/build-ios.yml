@@ -1,113 +1,49 @@
-- name: Install XcodeGen
+name: Umrah Guide iOS Build
+'on':
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate iOS Simulator Build
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Install XcodeGen
         run: brew install xcodegen
 
       - name: Generate Xcode project
-        run: |
-          xcodegen generate
-          test -d UmrahGuide.xcodeproj
+        run: xcodegen generate
 
-      - name: Import Apple development signing assets
-        env:
-          P12_BASE64: ${{ secrets.APPLE_DEVELOPMENT_CERTIFICATE_P12_BASE64 }}
-          P12_PASSWORD: ${{ secrets.APPLE_DEVELOPMENT_CERTIFICATE_PASSWORD }}
-          PROFILE_BASE64: ${{ secrets.IOS_DEVELOPMENT_PROFILE_BASE64 }}
-          KEYCHAIN_PASSWORD: ${{ secrets.CI_KEYCHAIN_PASSWORD }}
-        run: |
-          set -euo pipefail
-          : "${P12_BASE64:?Missing APPLE_DEVELOPMENT_CERTIFICATE_P12_BASE64 secret}"
-          : "${P12_PASSWORD:?Missing APPLE_DEVELOPMENT_CERTIFICATE_PASSWORD secret}"
-          : "${PROFILE_BASE64:?Missing IOS_DEVELOPMENT_PROFILE_BASE64 secret}"
-          : "${KEYCHAIN_PASSWORD:?Missing CI_KEYCHAIN_PASSWORD secret}"
-
-          CERT_PATH="$RUNNER_TEMP/apple_development.p12"
-          PROFILE_PATH="$RUNNER_TEMP/ios_development.mobileprovision"
-          KEYCHAIN_PATH="$RUNNER_TEMP/ios-build.keychain-db"
-
-          printf '%s' "$P12_BASE64" | base64 --decode > "$CERT_PATH"
-          printf '%s' "$PROFILE_BASE64" | base64 --decode > "$PROFILE_PATH"
-
-          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security import "$CERT_PATH" -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
-          security list-keychain -d user -s "$KEYCHAIN_PATH"
-          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-
-          PROFILE_PLIST="$RUNNER_TEMP/profile.plist"
-          security cms -D -i "$PROFILE_PATH" > "$PROFILE_PLIST"
-          PROFILE_UUID=$(/usr/libexec/PlistBuddy -c 'Print UUID' "$PROFILE_PLIST")
-          PROFILE_NAME=$(/usr/libexec/PlistBuddy -c 'Print Name' "$PROFILE_PLIST")
-          PROFILE_BUNDLE_ID=$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:application-identifier' "$PROFILE_PLIST" | sed 's/^[^.]*\.//')
-
-          if [ "$PROFILE_BUNDLE_ID" != "com.umrahguide.app" ]; then
-            echo "Provisioning profile Bundle ID ($PROFILE_BUNDLE_ID) does not match com.umrahguide.app"
-            exit 1
-          fi
-
-          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
-          cp "$PROFILE_PATH" "$HOME/Library/MobileDevice/Provisioning Profiles/$PROFILE_UUID.mobileprovision"
-          {
-            echo "PROFILE_UUID=$PROFILE_UUID"
-            echo "PROFILE_NAME=$PROFILE_NAME"
-            echo "KEYCHAIN_PATH=$KEYCHAIN_PATH"
-          } >> "$GITHUB_ENV"
-
-      - name: Archive for physical iPhone
+      - name: Build iOS Simulator
         run: |
           set -o pipefail
           xcodebuild \
             -project UmrahGuide.xcodeproj \
             -scheme UmrahGuide \
-            -configuration Release \
-            -destination 'generic/platform=iOS' \
-            -archivePath "$RUNNER_TEMP/UmrahGuide.xcarchive" \
-            CODE_SIGN_STYLE=Manual \
-            CODE_SIGN_IDENTITY="Apple Development" \
-            PROVISIONING_PROFILE_SPECIFIER="$PROFILE_NAME" \
-            DEVELOPMENT_TEAM="${{ secrets.APPLE_TEAM_ID }}" \
-            archive | tee archive.log
+            -sdk iphonesimulator \
+            -configuration Debug \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO \
+            clean build | tee build.log
 
-      - name: Create export options
-        run: |
-          cat > "$RUNNER_TEMP/ExportOptions.plist" <<'PLIST'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-            <key>method</key>
-            <string>development</string>
-            <key>signingStyle</key>
-            <string>manual</string>
-            <key>teamID</key>
-            <string>${{ secrets.APPLE_TEAM_ID }}</string>
-            <key>provisioningProfiles</key>
-            <dict>
-              <key>com.umrahguide.app</key>
-              <string>${{ env.PROFILE_NAME }}</string>
-            </dict>
-          </dict>
-          </plist>
-          PLIST
-          /usr/libexec/PlistBuddy -c "Set :teamID ${{ secrets.APPLE_TEAM_ID }}" "$RUNNER_TEMP/ExportOptions.plist"
-          /usr/libexec/PlistBuddy -c "Set :provisioningProfiles:com.umrahguide.app $PROFILE_NAME" "$RUNNER_TEMP/ExportOptions.plist"
-
-      - name: Export IPA
-        run: |
-          set -o pipefail
-          xcodebuild \
-            -exportArchive \
-            -archivePath "$RUNNER_TEMP/UmrahGuide.xcarchive" \
-            -exportPath "$RUNNER_TEMP/export" \
-            -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist" | tee export.log
-
-      - name: Upload signed IPA and logs
+      - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: umrah-guide-ipa-and-logs
-          path: |
-            ${{ runner.temp }}/export/*.ipa
-            archive.log
-            export.log
-          if-no-files-found: warn
+          name: umrah-guide-ios-build-log
+          path: build.log
+          if-no-files-found: ignore
           retention-days: 14
